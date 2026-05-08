@@ -4,13 +4,17 @@ using Tickless;
 using Tickless.Sample.BlogPublishing.Data;
 using Tickless.Sample.BlogPublishing.Endpoints;
 using Tickless.Sample.BlogPublishing.Jobs;
+using Tickless.Sample.BlogPublishing.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddDbContext<BlogContext>(options =>
     options.UseSqlite("Data Source=blog.db"));
 
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer<TicklessInfoDocumentTransformer>();
+});
 
 builder.Services.AddTickless();
 builder.Services.AddSingleton<IJobHandler, PublishPostJobHandler>();
@@ -26,12 +30,13 @@ using (var scope = app.Services.CreateScope())
 app.MapOpenApi();
 app.MapScalarApiReference(options =>
 {
-    options.Title = "Tickless Blog Sample";
-    options.Theme = ScalarTheme.BluePlanet;
+    options.Title = "Tickless — Live Demo";
+    options.Theme = ScalarTheme.Default;
     options.DarkMode = true;
+    options.CustomCss = TicklessScalarCustomization.Css;
 });
 
-app.MapGet("/", () => Results.Redirect("/scalar/v1"));
+app.MapGet("/", () => Results.Redirect("/scalar/v1")).ExcludeFromDescription();
 
 app.MapPostEndpoints();
 

@@ -31,17 +31,35 @@ public static class PostEndpoints
             return Results.Created($"/posts/{post.Id}", post);
         })
         .WithName("CreateScheduledPost")
-        .WithSummary("Create a post scheduled for future publication.");
+        .WithTags("Posts")
+        .WithSummary("Create a scheduled post")
+        .WithDescription("""
+            Persists a `Post` in `Scheduled` state and arms a Tickless timer for the supplied
+            `publishAtUtc`. The job id (`publish-{postId}`) is stable across restarts, so if the
+            process dies before the timer fires, recovery picks up exactly where it left off.
+
+            Try a `publishAtUtc` 30-60 seconds in the future, then poll `/scheduler/jobs`.
+            """);
 
         app.MapGet("/posts", async (BlogContext db) =>
             await db.Posts.OrderBy(p => p.PublishAtUtc).ToListAsync())
         .WithName("ListPosts")
-        .WithSummary("List all posts with their current status.");
+        .WithTags("Posts")
+        .WithSummary("List all posts")
+        .WithDescription("Returns every post regardless of status. Useful for confirming that a post flipped from `Scheduled` to `Published` after its timer fired.");
 
         app.MapGet("/scheduler/jobs", (IJobScheduler scheduler) =>
             scheduler.GetScheduled())
         .WithName("InspectScheduledJobs")
-        .WithSummary("Snapshot of jobs currently armed in the in-process scheduler.");
+        .WithTags("Scheduler")
+        .WithSummary("Snapshot of armed timers")
+        .WithDescription("""
+            Returns every job currently armed in the in-process scheduler, ordered as the
+            internal map enumerates them. Payloads are deliberately omitted so this endpoint
+            can be wired to an admin UI without leaking job data.
+
+            Hit this immediately after restarting the API to see the recovery path in action.
+            """);
 
         return app;
     }
