@@ -1,6 +1,6 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 
 namespace Tickless;
 
@@ -154,7 +154,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Tickless starting — recovering pending jobs from domain state.");
+        _logger.LogInformation("Tickless starting - recovering pending jobs from domain state.");
 
         foreach (var handler in _handlers.Values)
         {
@@ -185,7 +185,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     /// <inheritdoc />
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Tickless stopping — cancelling {Count} scheduled job(s).", _scheduledJobs.Count);
+        _logger.LogInformation("Tickless stopping - cancelling {Count} scheduled job(s).", _scheduledJobs.Count);
 
         foreach (var kvp in _scheduledJobs)
         {

@@ -18,8 +18,8 @@
     <PackageTags>scheduler;jobs;background-jobs;hosted-service;event-driven;dotnet;tickless</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/your-username/Tickless</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/your-username/Tickless</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/blaisedegier/Tickless</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/blaisedegier/Tickless</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
   </PropertyGroup>

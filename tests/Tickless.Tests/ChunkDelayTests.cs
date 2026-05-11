@@ -1,5 +1,4 @@
 using AwesomeAssertions;
-using Tickless;
 
 namespace Tickless.Tests;
 

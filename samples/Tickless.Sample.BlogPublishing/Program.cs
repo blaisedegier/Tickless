@@ -36,7 +36,7 @@ using (var scope = app.Services.CreateScope())
 app.MapOpenApi();
 app.MapScalarApiReference(options =>
 {
-    options.Title = "Tickless — Live Demo";
+    options.Title = "Tickless - Live Demo";
     options.Theme = ScalarTheme.Default;
     options.DarkMode = true;
     options.CustomCss = TicklessScalarCustomization.Css;

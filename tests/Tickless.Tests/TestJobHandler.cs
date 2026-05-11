@@ -1,5 +1,3 @@
-using Tickless;
-
 namespace Tickless.Tests;
 
 internal sealed class TestJobHandler : IJobHandler

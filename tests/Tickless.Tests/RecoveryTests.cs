@@ -1,6 +1,5 @@
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
-using Tickless;
 
 namespace Tickless.Tests;
 

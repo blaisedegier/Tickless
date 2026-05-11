@@ -1,6 +1,6 @@
-using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
+using System.Text.Json.Nodes;
 
 namespace Tickless.Sample.BlogPublishing.OpenApi;
 
@@ -35,13 +35,13 @@ internal sealed class TicklessInfoDocumentTransformer : IOpenApiDocumentTransfor
     {
         document.Info = new OpenApiInfo
         {
-            Title = "Tickless — Blog Publishing Sample",
+            Title = "Tickless - Blog Publishing Sample",
             Version = "1.0.0",
             Description = TicklessIntroduction.Markdown,
             Contact = new OpenApiContact
             {
                 Name = "Blaise De Gier",
-                Url = new Uri("https://github.com/your-username/Tickless")
+                Url = new Uri("https://github.com/blaisedegier/Tickless")
             },
             License = new OpenApiLicense
             {
@@ -91,7 +91,7 @@ internal static class TicklessIntroduction
         ## More
 
         - Package: [`Tickless` on NuGet](https://www.nuget.org/packages/Tickless)
-        - Repo: [`Tickless` on GitHub](https://github.com/your-username/Tickless)
+        - Repo: [`Tickless` on GitHub](https://github.com/blaisedegier/Tickless)
         - The full README has the comparison table and a "when not to use this" section.
         """;
 }
