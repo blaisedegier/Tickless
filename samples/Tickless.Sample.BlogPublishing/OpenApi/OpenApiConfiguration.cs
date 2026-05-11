@@ -1,7 +1,33 @@
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
 
 namespace Tickless.Sample.BlogPublishing.OpenApi;
+
+internal sealed class CreatePostExampleTransformer : IOpenApiOperationTransformer
+{
+    public Task TransformAsync(OpenApiOperation operation, OpenApiOperationTransformerContext context, CancellationToken cancellationToken)
+    {
+        var desc = context.Description;
+        if (desc.RelativePath != "posts" || !string.Equals(desc.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.CompletedTask;
+        }
+
+        if (operation.RequestBody?.Content?.TryGetValue("application/json", out var media) == true)
+        {
+            media.Example = JsonNode.Parse($$"""
+                {
+                  "title": "Hello from Tickless",
+                  "body": "This post is scheduled to publish in about 60 seconds.",
+                  "publishAtUtc": "{{DateTime.UtcNow.AddSeconds(60):O}}"
+                }
+                """);
+        }
+
+        return Task.CompletedTask;
+    }
+}
 
 internal sealed class TicklessInfoDocumentTransformer : IOpenApiDocumentTransformer
 {

@@ -11,15 +11,21 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<BlogContext>(options =>
     options.UseSqlite("Data Source=blog.db"));
 
+builder.Services.AddProblemDetails();
+
 builder.Services.AddOpenApi(options =>
 {
     options.AddDocumentTransformer<TicklessInfoDocumentTransformer>();
+    options.AddOperationTransformer<CreatePostExampleTransformer>();
 });
 
 builder.Services.AddTickless();
 builder.Services.AddSingleton<IJobHandler, PublishPostJobHandler>();
 
 var app = builder.Build();
+
+app.UseExceptionHandler();
+app.UseStatusCodePages();
 
 using (var scope = app.Services.CreateScope())
 {
