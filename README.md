@@ -7,8 +7,6 @@
 [![.NET](https://img.shields.io/badge/.NET-10-blueviolet.svg)](https://dotnet.microsoft.com/)
 [![CI](https://github.com/blaisedegier/Tickless/actions/workflows/ci.yml/badge.svg)](https://github.com/blaisedegier/Tickless/actions/workflows/ci.yml)
 
-<!-- hero image: replace with Carbon-style "before / after" code snippet before announcing -->
-
 ## 📑 Table of Contents
 
 - [💡 The Idea](#-the-idea)
@@ -129,8 +127,6 @@ dotnet run --project samples/Tickless.Sample.BlogPublishing
 ```
 
 Then open <http://localhost:5009/scalar/v1>. The Scalar page doubles as the demo's introduction, with a "Try it in 60 seconds" walkthrough that exercises the recovery path directly from the browser.
-
-<!-- demo gif: record once and embed before announcing -->
 
 ## 📁 Project Structure
 
