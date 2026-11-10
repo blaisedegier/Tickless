@@ -57,11 +57,8 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             return Task.CompletedTask;
         }
 
-        CancelInternal(jobId);
-
-        var cts = new CancellationTokenSource();
-        var entry = new ScheduledEntry(cts, executeAtUtc, jobType);
-        _scheduledJobs[jobId] = entry;
+        var entry = new ScheduledEntry(executeAtUtc, jobType);
+        Install(jobId, entry);
 
         var delay = executeAtUtc - _time.GetUtcNow().UtcDateTime;
         if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
@@ -70,7 +67,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             "Scheduled job '{JobId}' (type: {JobType}) to execute at {ExecuteAt:u} (in {Delay}).",
             jobId, jobType, executeAtUtc, delay);
 
-        _ = ExecuteAfterDelayAsync(jobId, delay, jobType, payload, cts.Token);
+        _ = ExecuteAfterDelayAsync(jobId, entry, delay, payload);
 
         return Task.CompletedTask;
     }
@@ -120,36 +117,53 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
     }
 
+    // Puts the entry in the map, replacing any existing entry for the same id. Concurrent calls for
+    // one id cannot both win: TryUpdate only succeeds against the exact entry that was read, so
+    // every replaced entry is seen by exactly one caller, which cancels its timer.
+    private void Install(string jobId, ScheduledEntry entry)
+    {
+        while (true)
+        {
+            if (_scheduledJobs.TryGetValue(jobId, out var existing))
+            {
+                if (_scheduledJobs.TryUpdate(jobId, entry, existing))
+                {
+                    existing.Cancel();
+                    return;
+                }
+            }
+            else if (_scheduledJobs.TryAdd(jobId, entry))
+            {
+                return;
+            }
+        }
+    }
+
+    // Whoever removes an entry from the map owns cancelling and disposing it.
     private bool CancelInternal(string jobId)
     {
         if (_scheduledJobs.TryRemove(jobId, out var entry))
         {
-            entry.Cts.Cancel();
-            entry.Cts.Dispose();
+            entry.Cancel();
             return true;
         }
         return false;
     }
 
-    private async Task ExecuteAfterDelayAsync(string jobId, TimeSpan delay, string jobType, string? payload, CancellationToken ct)
+    private async Task ExecuteAfterDelayAsync(string jobId, ScheduledEntry entry, TimeSpan delay, string? payload)
     {
+        var token = entry.Token;
         try
         {
             foreach (var chunk in ChunkDelay(delay))
             {
-                await Task.Delay(chunk, _time, ct);
+                await Task.Delay(chunk, _time, token);
             }
 
-            if (!_handlers.TryGetValue(jobType, out var handler))
-            {
-                _logger.LogError("Handler for job type '{JobType}' not found at execution time.", jobType);
-                return;
-            }
-
-            _logger.LogInformation("Executing job '{JobId}' (type: {JobType}).", jobId, jobType);
+            var handler = _handlers[entry.JobType];
+            _logger.LogInformation("Executing job '{JobId}' (type: {JobType}).", jobId, entry.JobType);
             await handler.ExecuteAsync(payload);
 
-            _scheduledJobs.TryRemove(jobId, out _);
             _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
         }
         catch (OperationCanceledException)
@@ -158,8 +172,16 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Job '{JobId}' (type: {JobType}) failed.", jobId, jobType);
-            _scheduledJobs.TryRemove(jobId, out _);
+            _logger.LogError(ex, "Job '{JobId}' (type: {JobType}) failed.", jobId, entry.JobType);
+        }
+        finally
+        {
+            // Remove only the entry this execution armed. If the job was rescheduled while the
+            // handler ran, the map now holds a newer entry for the same id and it must survive.
+            if (_scheduledJobs.TryRemove(KeyValuePair.Create(jobId, entry)))
+            {
+                entry.Release();
+            }
         }
     }
 
@@ -199,15 +221,38 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     {
         _logger.LogInformation("Tickless stopping - cancelling {Count} scheduled job(s).", _scheduledJobs.Count);
 
-        foreach (var kvp in _scheduledJobs)
+        foreach (var jobId in _scheduledJobs.Keys)
         {
-            kvp.Value.Cts.Cancel();
-            kvp.Value.Cts.Dispose();
+            CancelInternal(jobId);
         }
-        _scheduledJobs.Clear();
 
         return Task.CompletedTask;
     }
 
-    private sealed record ScheduledEntry(CancellationTokenSource Cts, DateTime ExecuteAtUtc, string JobType);
+    // A class rather than a record: entries are compared by reference, so a conditional remove
+    // only ever removes the exact entry the caller armed.
+    private sealed class ScheduledEntry
+    {
+        private readonly CancellationTokenSource _cts = new();
+
+        public ScheduledEntry(DateTime executeAtUtc, string jobType)
+        {
+            ExecuteAtUtc = executeAtUtc;
+            JobType = jobType;
+            // Captured up front: reading CancellationTokenSource.Token after Dispose throws.
+            Token = _cts.Token;
+        }
+
+        public DateTime ExecuteAtUtc { get; }
+        public string JobType { get; }
+        public CancellationToken Token { get; }
+
+        public void Cancel()
+        {
+            _cts.Cancel();
+            _cts.Dispose();
+        }
+
+        public void Release() => _cts.Dispose();
+    }
 }

@@ -114,6 +114,34 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
+    public async Task Reschedule_WhileHandlerRunning_NewEntryRemainsVisibleAndCancellable()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new RecordingLogger<InProcessJobScheduler>();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new TestJobHandler { OnExecute = _ => gate.Task };
+        var scheduler = CreateScheduler(time, logger, handler);
+
+        await scheduler.ScheduleAsync("job-1", Now(time), "Test", "first");
+        await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var rescheduledFor = Now(time).AddMinutes(5);
+        await scheduler.ScheduleAsync("job-1", rescheduledFor, "Test", "second");
+
+        gate.SetResult();
+        await Wait.UntilAsync(() => logger.Entries.Any(e => e.Message.Contains("'job-1' completed")));
+
+        scheduler.GetScheduled().Should().ContainSingle()
+            .Which.ExecuteAtUtc.Should().Be(rescheduledFor);
+
+        await scheduler.CancelAsync("job-1");
+        time.Advance(TimeSpan.FromMinutes(10));
+
+        scheduler.GetScheduled().Should().BeEmpty();
+        handler.Payloads.Should().ContainSingle().Which.Should().Be("first");
+    }
+
+    [Fact]
     public async Task GetScheduled_ReturnsCurrentlyScheduledJobsAndReflectsCancellations()
     {
         var handler = new TestJobHandler();
