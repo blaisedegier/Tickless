@@ -19,6 +19,11 @@ public interface IJobScheduler
     /// <param name="executeAtUtc">When to execute the job. Times in the past fire as soon as possible.</param>
     /// <param name="jobType">Job type identifier; must match the <see cref="IJobHandler.JobType"/> of a registered handler.</param>
     /// <param name="payload">Optional serialised data passed to the handler at execution time.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="jobId"/> or <paramref name="jobType"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// No handler is registered for <paramref name="jobType"/>. The exception is thrown before any
+    /// existing job with the same <paramref name="jobId"/> is touched, so that job stays scheduled.
+    /// </exception>
     Task ScheduleAsync(string jobId, DateTime executeAtUtc, string jobType, string? payload = null);
 
     /// <summary>

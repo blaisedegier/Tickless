@@ -49,12 +49,18 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     /// <inheritdoc />
     public Task ScheduleAsync(string jobId, DateTime executeAtUtc, string jobType, string? payload = null)
     {
+        ArgumentNullException.ThrowIfNull(jobId);
+        ArgumentNullException.ThrowIfNull(jobType);
+
+        // Checked before the map is touched, so a bad call never cancels an existing job.
         if (!_handlers.ContainsKey(jobType))
         {
-            _logger.LogError(
-                "No handler registered for job type '{JobType}'. Job '{JobId}' will not be scheduled.",
-                jobType, jobId);
-            return Task.CompletedTask;
+            var registered = _handlers.Count == 0
+                ? "none"
+                : string.Join(", ", _handlers.Keys.Order(StringComparer.Ordinal).Select(t => $"'{t}'"));
+            throw new ArgumentException(
+                $"No handler is registered for job type '{jobType}'. Registered job types: {registered}.",
+                nameof(jobType));
         }
 
         var entry = new ScheduledEntry(executeAtUtc, jobType);

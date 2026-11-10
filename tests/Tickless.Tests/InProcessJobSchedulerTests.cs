@@ -85,14 +85,36 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
-    public async Task ScheduleAsync_UnknownJobType_DoesNotSchedule()
+    public async Task ScheduleAsync_UnknownJobType_Throws()
     {
         var handler = new TestJobHandler("KnownType");
         var scheduler = CreateScheduler(handler);
 
-        await scheduler.ScheduleAsync("job-1", DateTime.UtcNow.AddSeconds(10), "UnknownType");
+        var act = () => scheduler.ScheduleAsync("job-1", DateTime.UtcNow.AddSeconds(10), "UnknownType");
 
+        (await act.Should().ThrowAsync<ArgumentException>())
+            .WithParameterName("jobType")
+            .WithMessage("*'UnknownType'*'KnownType'*");
         scheduler.GetScheduled().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ScheduleAsync_UnknownJobType_DoesNotCancelExistingJobWithSameId()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new TestJobHandler("KnownType");
+        var scheduler = CreateScheduler(time, handler);
+        var dueAt = Now(time).AddSeconds(10);
+
+        await scheduler.ScheduleAsync("job-1", dueAt, "KnownType", "payload");
+        var act = () => scheduler.ScheduleAsync("job-1", Now(time).AddSeconds(20), "UnknownType");
+        await act.Should().ThrowAsync<ArgumentException>();
+
+        scheduler.GetScheduled().Should().ContainSingle()
+            .Which.Should().Be(new ScheduledJobView("job-1", dueAt, "KnownType"));
+
+        time.Advance(TimeSpan.FromSeconds(10));
+        (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("payload");
     }
 
     [Fact]
