@@ -122,6 +122,12 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     internal int InFlightExecutions => _executions.Count;
 
     /// <summary>
+    /// Test seam: called with the job id after a job's timer has fired and before its handler is
+    /// called, so a test can cancel or reschedule the job inside that window.
+    /// </summary>
+    internal Action<string>? TimerFired { get; set; }
+
+    /// <summary>
     /// Returns the same instant with <see cref="DateTimeKind.Utc"/>. A <see cref="DateTimeKind.Local"/>
     /// value is converted. An <see cref="DateTimeKind.Unspecified"/> value is taken to be UTC already,
     /// because that is how EF Core and most ADO.NET providers read a UTC column back.
@@ -222,11 +228,17 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
                 {
                     await Task.Delay(chunk, _time, token).ConfigureAwait(false);
                 }
+
+                TimerFired?.Invoke(jobId);
+
+                // A cancel or reschedule can land after the delay completes and before the handler
+                // is called. Checking here keeps it from running the job it was meant to stop.
+                token.ThrowIfCancellationRequested();
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                // The timer was cancelled before it fired: the job was replaced or cancelled, or
-                // the scheduler is stopping.
+                // The timer was cancelled before the handler started: the job was replaced or
+                // cancelled, or the scheduler is stopping.
                 return;
             }
 

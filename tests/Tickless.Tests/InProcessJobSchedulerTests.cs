@@ -74,6 +74,52 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
+    public async Task CancelAsync_AfterTimerFiresButBeforeHandlerStarts_DoesNotRunHandler()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new TestJobHandler();
+        var scheduler = CreateScheduler(time, handler);
+        scheduler.TimerFired = jobId => _ = scheduler.CancelAsync(jobId);
+
+        await scheduler.ScheduleAsync("job-1", Now(time).AddSeconds(1), "Test");
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Wait.UntilAsync(() => scheduler.InFlightExecutions == 0);
+
+        handler.Payloads.Should().BeEmpty();
+        scheduler.GetScheduled().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Reschedule_AfterTimerFiresButBeforeHandlerStarts_RunsOnlyTheNewSchedule()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new TestJobHandler();
+        var scheduler = CreateScheduler(time, handler);
+        var rescheduledFor = Now(time).AddMinutes(5);
+        var rescheduled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        scheduler.TimerFired = jobId =>
+        {
+            // Only the first firing reschedules; the second must run the new payload.
+            scheduler.TimerFired = null;
+            _ = scheduler.ScheduleAsync(jobId, rescheduledFor, "Test", "second");
+            rescheduled.SetResult();
+        };
+
+        await scheduler.ScheduleAsync("job-1", Now(time).AddSeconds(1), "Test", "first");
+        time.Advance(TimeSpan.FromSeconds(1));
+        await rescheduled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        // The first execution has finished once only the new timer is left.
+        await Wait.UntilAsync(() => scheduler.InFlightExecutions == 1);
+
+        handler.Payloads.Should().BeEmpty();
+        scheduler.GetScheduled().Should().ContainSingle().Which.ExecuteAtUtc.Should().Be(rescheduledFor);
+
+        time.Advance(TimeSpan.FromMinutes(5));
+        (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("second");
+        handler.Payloads.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task CancelAsync_UnknownJobId_IsNoOp()
     {
         var handler = new TestJobHandler();

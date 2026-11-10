@@ -12,6 +12,7 @@ The public API only grows in this release: `dotnet pack` validates it against 1.
 - Concurrent `ScheduleAsync` calls for the same job id could leave a replaced timer running. Replacement is now atomic, so exactly one timer survives.
 - An `OperationCanceledException` thrown by a handler itself (an `HttpClient` timeout, for example) was taken for the scheduler's own cancellation: it was not logged and the job stayed in `GetScheduled()` for good. It is now logged as a failure and the job is removed.
 - A `DateTime` with `Kind=Local` fired early or late by the machine's UTC offset. Local values are now converted to UTC, `Unspecified` values are treated as UTC, and `GetScheduled()` always reports `Kind=Utc`.
+- A `CancelAsync` or `ScheduleAsync` for the same id that landed just after a job's timer fired, but before its handler was called, still ran the old handler. The timer's token is now checked again before the handler is called.
 - A job due now or in the past ran its handler on the caller's thread inside `ScheduleAsync`, so at startup every overdue handler ran in turn before the host finished starting. It now runs on the thread pool.
 
 ### Added
