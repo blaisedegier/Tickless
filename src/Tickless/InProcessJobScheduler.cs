@@ -176,9 +176,17 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         {
             try
             {
+                if (delay == TimeSpan.Zero)
+                {
+                    // A past-due job must not run on the caller's thread. ScheduleAsync would not
+                    // return until the handler's first await, and StartAsync would recover overdue
+                    // jobs one handler run at a time.
+                    await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                }
+
                 foreach (var chunk in ChunkDelay(delay))
                 {
-                    await Task.Delay(chunk, _time, token);
+                    await Task.Delay(chunk, _time, token).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -190,7 +198,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             _logger.LogInformation("Executing job '{JobId}' (type: {JobType}).", jobId, entry.JobType);
             try
             {
-                await _handlers[entry.JobType].ExecuteAsync(payload);
+                await _handlers[entry.JobType].ExecuteAsync(payload).ConfigureAwait(false);
                 _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
             }
             catch (Exception ex)
@@ -220,10 +228,10 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         {
             try
             {
-                var pending = (await handler.RecoverPendingJobsAsync()).ToList();
+                var pending = (await handler.RecoverPendingJobsAsync().ConfigureAwait(false)).ToList();
                 foreach (var job in pending)
                 {
-                    await ScheduleAsync(job.JobId, job.ExecuteAtUtc, handler.JobType, job.Payload);
+                    await ScheduleAsync(job.JobId, job.ExecuteAtUtc, handler.JobType, job.Payload).ConfigureAwait(false);
                 }
 
                 if (pending.Count > 0)

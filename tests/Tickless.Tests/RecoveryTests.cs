@@ -67,4 +67,33 @@ public class RecoveryTests
         var executed = await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         executed.Should().Be("recovered-payload");
     }
+
+    [Fact]
+    public async Task StartAsync_PastDueRecoveredJob_DoesNotRunHandlerInline()
+    {
+        using var gate = new ManualResetEventSlim();
+        var handler = new TestJobHandler
+        {
+            RecoveryJobs = new[] { new ScheduledJob("overdue", DateTime.UtcNow.AddHours(-1), "late") },
+            // Blocks synchronously, so a handler running on the caller's thread would hold up StartAsync.
+            OnExecute = _ =>
+            {
+                gate.Wait(TimeSpan.FromSeconds(10));
+                return Task.CompletedTask;
+            },
+        };
+        var scheduler = CreateScheduler(handler);
+
+        try
+        {
+            await Task.Run(() => scheduler.StartAsync(default)).WaitAsync(TimeSpan.FromSeconds(2));
+            await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("late");
+    }
 }
