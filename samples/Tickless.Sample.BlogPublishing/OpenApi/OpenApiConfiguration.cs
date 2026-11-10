@@ -40,7 +40,7 @@ internal sealed class TicklessInfoDocumentTransformer : IOpenApiDocumentTransfor
             Description = TicklessIntroduction.Markdown,
             Contact = new OpenApiContact
             {
-                Name = "Blaise De Gier",
+                Name = "Blaise de Gier",
                 Url = new Uri("https://github.com/blaisedegier/Tickless")
             },
             License = new OpenApiLicense
