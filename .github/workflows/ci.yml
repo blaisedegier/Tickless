@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
-    branches: ['**']
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
@@ -23,4 +25,10 @@ jobs:
         run: dotnet build Tickless.slnx -c Release --no-restore
 
       - name: Test
+        # A zone far from UTC with a 45-minute offset, so DateTime.Kind handling is really exercised.
+        env:
+          TZ: Pacific/Chatham
         run: dotnet test Tickless.slnx -c Release --no-build --verbosity normal
+
+      - name: Pack (API compatibility check against the published 1.0.0)
+        run: dotnet pack src/Tickless/Tickless.csproj -c Release --no-build -o ./artifacts
