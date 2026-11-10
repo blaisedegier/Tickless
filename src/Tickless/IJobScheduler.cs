@@ -16,7 +16,12 @@ public interface IJobScheduler
     /// If a job with the same <paramref name="jobId"/> already exists, it is cancelled and replaced.
     /// </summary>
     /// <param name="jobId">Unique identifier for this job. Used for cancellation and idempotent replacement.</param>
-    /// <param name="executeAtUtc">When to execute the job. Times in the past fire as soon as possible.</param>
+    /// <param name="executeAtUtc">
+    /// When to execute the job. Times in the past fire as soon as possible. A value with
+    /// <see cref="DateTimeKind.Local"/> is converted to UTC; a value with
+    /// <see cref="DateTimeKind.Unspecified"/> is treated as UTC. The stored time, as reported by
+    /// <see cref="GetScheduled"/>, always has <see cref="DateTimeKind.Utc"/>.
+    /// </param>
     /// <param name="jobType">Job type identifier; must match the <see cref="IJobHandler.JobType"/> of a registered handler.</param>
     /// <param name="payload">Optional serialised data passed to the handler at execution time.</param>
     /// <exception cref="ArgumentNullException"><paramref name="jobId"/> or <paramref name="jobType"/> is null.</exception>

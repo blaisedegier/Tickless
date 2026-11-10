@@ -182,6 +182,43 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
+    public async Task LocalKind_IsConvertedToUtc()
+    {
+        // CI runs this under TZ=Pacific/Chatham (UTC+12:45 or +13:45), so local time is never UTC there.
+        var time = new FakeTimeProvider();
+        var scheduler = CreateScheduler(time, new TestJobHandler());
+        var dueUtc = Now(time).AddHours(1);
+        var dueLocal = dueUtc.ToLocalTime();
+
+        await scheduler.ScheduleAsync("job-1", dueLocal, "Test");
+
+        var scheduled = scheduler.GetScheduled().Should().ContainSingle().Subject;
+        scheduled.ExecuteAtUtc.Kind.Should().Be(DateTimeKind.Utc);
+        scheduled.ExecuteAtUtc.Should().Be(dueUtc);
+    }
+
+    [Fact]
+    public async Task UnspecifiedKind_IsTreatedAsUtc()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new TestJobHandler();
+        var scheduler = CreateScheduler(time, handler);
+        var dueUtc = Now(time).AddHours(1);
+        var asReadFromDatabase = DateTime.SpecifyKind(dueUtc, DateTimeKind.Unspecified);
+
+        await scheduler.ScheduleAsync("job-1", asReadFromDatabase, "Test", "payload");
+
+        var scheduled = scheduler.GetScheduled().Should().ContainSingle().Subject;
+        scheduled.ExecuteAtUtc.Kind.Should().Be(DateTimeKind.Utc);
+        scheduled.ExecuteAtUtc.Should().Be(dueUtc);
+
+        time.Advance(TimeSpan.FromMinutes(59));
+        handler.Payloads.Should().BeEmpty();
+        time.Advance(TimeSpan.FromMinutes(1));
+        (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("payload");
+    }
+
+    [Fact]
     public async Task GetScheduled_ReturnsCurrentlyScheduledJobsAndReflectsCancellations()
     {
         var handler = new TestJobHandler();

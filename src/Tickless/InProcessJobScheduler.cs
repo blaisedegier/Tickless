@@ -63,15 +63,16 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
                 nameof(jobType));
         }
 
-        var entry = new ScheduledEntry(executeAtUtc, jobType);
+        var executeAt = NormalizeToUtc(executeAtUtc);
+        var entry = new ScheduledEntry(executeAt, jobType);
         Install(jobId, entry);
 
-        var delay = executeAtUtc - _time.GetUtcNow().UtcDateTime;
+        var delay = executeAt - _time.GetUtcNow().UtcDateTime;
         if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
 
         _logger.LogInformation(
             "Scheduled job '{JobId}' (type: {JobType}) to execute at {ExecuteAt:u} (in {Delay}).",
-            jobId, jobType, executeAtUtc, delay);
+            jobId, jobType, executeAt, delay);
 
         _ = ExecuteAfterDelayAsync(jobId, entry, delay, payload);
 
@@ -96,6 +97,18 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             .ToList()
             .AsReadOnly();
     }
+
+    /// <summary>
+    /// Returns the same instant with <see cref="DateTimeKind.Utc"/>. A <see cref="DateTimeKind.Local"/>
+    /// value is converted. An <see cref="DateTimeKind.Unspecified"/> value is taken to be UTC already,
+    /// because that is how EF Core and most ADO.NET providers read a UTC column back.
+    /// </summary>
+    internal static DateTime NormalizeToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Local => value.ToUniversalTime(),
+        DateTimeKind.Unspecified => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+        _ => value,
+    };
 
     /// <summary>
     /// Splits a delay larger than <see cref="int.MaxValue"/> milliseconds (~24.9 days) into chunks
