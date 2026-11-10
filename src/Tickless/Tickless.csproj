@@ -11,7 +11,7 @@
 
   <PropertyGroup Label="Package metadata">
     <PackageId>Tickless</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Blaise De Gier</Authors>
     <Copyright>Copyright (c) Blaise De Gier $([System.DateTime]::Now.Year)</Copyright>
     <Description>An event-driven, in-process job scheduler for .NET that owns no tables. Jobs fire at exact UTC instants via Task.Delay; recovery on restart is delegated to each handler, which queries its own domain rows. Single-instance, zero infrastructure dependencies.</Description>
