@@ -26,7 +26,16 @@ The public API only grows in this release: `dotnet pack` validates it against 1.
 
 - `ScheduleAsync` with a job type that has no registered handler now throws `ArgumentException` (parameter `jobType`). In 1.0 it logged an error and silently dropped the job. The exception is thrown before an existing job with the same id is touched.
 - `ScheduleAsync` called after `StopAsync` logs a warning and schedules nothing.
-- Unit tests that mock `IJobHandler` and verify a call to `ExecuteAsync(payload)` will now see `ExecuteAsync(payload, token)` instead, because that is the overload the scheduler calls. With Moq, for example, verify `ExecuteAsync(payload, It.IsAny<CancellationToken>())`.
+- Unit tests that mock `IJobHandler` and set up only the 1.0 overloads no longer reach those setups. The scheduler calls the `CancellationToken` overloads, and the mock's proxy intercepts them instead of running their default implementations. A loose Moq mock returns a completed task, so the job appears to succeed while the 1.0 setup never runs and `Verify` on it fails; a strict mock throws. Set up the token overload, or set `CallBase = true` so the default implementations forward to the 1.0 setups:
+
+  ```csharp
+  handler.Setup(h => h.ExecuteAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+         .Returns(Task.CompletedTask);
+  // or
+  var handler = new Mock<IJobHandler> { CallBase = true };
+  ```
+
+  A handler that returns `null` instead of a task from either token overload is treated as having nothing to do, with a warning logged once per job type, instead of failing every job. See "Upgrading from 1.0" in the README.
 
 ## 1.0.0 - 2026-05-11
 

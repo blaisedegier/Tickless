@@ -134,6 +134,31 @@ app.MapGet("/scheduler/jobs", (IJobScheduler s) => s.GetScheduled());
 
 Scheduling an id that already exists replaces the earlier job. A time in the past fires as soon as possible, on the thread pool rather than the caller's thread. `GetScheduled()` returns `JobId`, `ExecuteAtUtc` and `JobType` for each armed timer; payloads are left out so the list is safe to expose to an admin page.
 
+### Upgrading from 1.0
+
+Handlers written against 1.0 compile and run unchanged, with two exceptions worth checking:
+
+- Scheduling a job type that has no registered handler now throws `ArgumentException` instead of logging an error and dropping the job.
+- **Mocked handlers in unit tests.** The scheduler calls the `CancellationToken` overloads. A mocking library's proxy intercepts those overloads as well, so their default implementations never run and a setup on the 1.0 overload is never reached. With Moq, a loose mock returns a completed task from the unset overload: the job looks successful, but the 1.0 setup's callback does not run and `Verify` on the 1.0 overload fails. A strict mock throws.
+
+Set up the overload the scheduler calls, or let the mock run the default implementations, which forward to your existing 1.0 setups:
+
+```csharp
+var handler = new Mock<IJobHandler>();
+handler.SetupGet(h => h.JobType).Returns("PublishPost");
+handler.Setup(h => h.ExecuteAsync(It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+       .Returns(Task.CompletedTask);
+// ...
+handler.Verify(h => h.ExecuteAsync("42", It.IsAny<CancellationToken>()), Times.Once);
+
+// Or keep the 1.0 setups and turn on CallBase:
+var legacy = new Mock<IJobHandler> { CallBase = true };
+legacy.SetupGet(h => h.JobType).Returns("PublishPost");
+legacy.Setup(h => h.ExecuteAsync(It.IsAny<string?>())).Returns(Task.CompletedTask);
+```
+
+If a handler returns `null` instead of a task from either overload, the scheduler treats it as having nothing to do and logs a warning once per job type, rather than failing every job.
+
 ### The sample
 
 [`samples/Tickless.Sample.BlogPublishing`](https://github.com/blaisedegier/Tickless/tree/main/samples/Tickless.Sample.BlogPublishing) is a minimal API over SQLite with a [Scalar](https://scalar.com) UI. Schedule a post a minute out, stop the process before it fires, start it again, and the timer is re-armed from the `Posts` table and the post publishes on time.
