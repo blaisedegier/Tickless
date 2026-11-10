@@ -155,24 +155,31 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         var token = entry.Token;
         try
         {
-            foreach (var chunk in ChunkDelay(delay))
+            try
             {
-                await Task.Delay(chunk, _time, token);
+                foreach (var chunk in ChunkDelay(delay))
+                {
+                    await Task.Delay(chunk, _time, token);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // The timer was cancelled before it fired: the job was replaced or cancelled.
+                return;
             }
 
-            var handler = _handlers[entry.JobType];
             _logger.LogInformation("Executing job '{JobId}' (type: {JobType}).", jobId, entry.JobType);
-            await handler.ExecuteAsync(payload);
-
-            _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected when ScheduleAsync replaces this job or CancelAsync is called.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Job '{JobId}' (type: {JobType}) failed.", jobId, entry.JobType);
+            try
+            {
+                await _handlers[entry.JobType].ExecuteAsync(payload);
+                _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
+            }
+            catch (Exception ex)
+            {
+                // Includes an OperationCanceledException the handler raised itself, such as an
+                // HttpClient timeout. Nothing in the scheduler asked it to stop, so it is a failure.
+                _logger.LogError(ex, "Job '{JobId}' (type: {JobType}) failed.", jobId, entry.JobType);
+            }
         }
         finally
         {

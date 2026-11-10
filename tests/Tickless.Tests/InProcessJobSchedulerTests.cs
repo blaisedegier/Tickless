@@ -142,6 +142,24 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
+    public async Task HandlerThrowsOwnOperationCanceled_IsTreatedAsFailureAndRemoved()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new RecordingLogger<InProcessJobScheduler>();
+        // For example an HttpClient timeout, which surfaces as TaskCanceledException.
+        var handler = new TestJobHandler { OnExecute = _ => throw new TaskCanceledException("timed out") };
+        var scheduler = CreateScheduler(time, logger, handler);
+
+        await scheduler.ScheduleAsync("job-1", Now(time).AddSeconds(1), "Test");
+        time.Advance(TimeSpan.FromSeconds(1));
+
+        await Wait.UntilAsync(() => logger.Entries.Any(e => e.Level == LogLevel.Error));
+        logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error)
+            .Which.Exception.Should().BeOfType<TaskCanceledException>();
+        await Wait.UntilAsync(() => scheduler.GetScheduled().Count == 0);
+    }
+
+    [Fact]
     public async Task GetScheduled_ReturnsCurrentlyScheduledJobsAndReflectsCancellations()
     {
         var handler = new TestJobHandler();
