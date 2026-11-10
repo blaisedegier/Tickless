@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # lets NuGet/login exchange GitHub's OIDC token for a short-lived nuget.org key
 
 jobs:
   publish:
@@ -32,5 +33,13 @@ jobs:
       - name: Pack
         run: dotnet pack src/Tickless/Tickless.csproj -c Release /p:Version=${{ steps.version.outputs.value }} -o ./artifacts
 
+      # Trusted Publishing: no stored API key. nuget.org issues a key valid for about an hour,
+      # only to this repository's release.yml, as configured in the package's trusted publishing policy.
+      - name: Log in to nuget.org
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: blaise.degier
+
       - name: Push to NuGet
-        run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
