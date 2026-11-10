@@ -20,7 +20,7 @@ internal sealed class CreatePostExampleTransformer : IOpenApiOperationTransforme
                 {
                   "title": "Hello from Tickless",
                   "body": "This post is scheduled to publish in about 60 seconds.",
-                  "publishAtUtc": "{{DateTime.UtcNow.AddSeconds(60):O}}"
+                  "publishAt": "{{DateTimeOffset.UtcNow.AddSeconds(60):O}}"
                 }
                 """);
         }
@@ -82,7 +82,7 @@ internal static class TicklessIntroduction
 
         ## Try it in 60 seconds
 
-        1. **POST `/posts`** with a `publishAtUtc` 30-60 seconds in the future. The post lands in `Scheduled` state.
+        1. **POST `/posts`** with a `publishAt` 30-60 seconds in the future. The post lands in `Scheduled` state.
         2. **GET `/scheduler/jobs`** to confirm the timer is armed.
         3. **Hit Ctrl+C** in the terminal running this API.
         4. **Restart it.** Hit `/scheduler/jobs` again, the same job is back, rearmed from SQLite.
@@ -92,7 +92,7 @@ internal static class TicklessIntroduction
 
         - Package: [`Tickless` on NuGet](https://www.nuget.org/packages/Tickless)
         - Repo: [`Tickless` on GitHub](https://github.com/blaisedegier/Tickless)
-        - The full README has the comparison table and a "when not to use this" section.
+        - The README compares Tickless with Hangfire, Quartz.NET and Coravel and lists its known limitations.
         """;
 }
 

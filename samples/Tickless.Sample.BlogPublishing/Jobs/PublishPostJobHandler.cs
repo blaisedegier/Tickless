@@ -7,6 +7,11 @@ namespace Tickless.Sample.BlogPublishing.Jobs;
 /// Flips a Post from Scheduled to Published when its scheduled time arrives,
 /// and rehydrates pending jobs at startup by querying the Posts table.
 /// </summary>
+/// <remarks>
+/// Implements the cancellation-aware overloads, which the scheduler calls, and forwards the
+/// original overloads to them. Execution is idempotent: a post that is already published is left
+/// alone, so running the job twice (delivery is at-least-once) does no harm.
+/// </remarks>
 public class PublishPostJobHandler : IJobHandler
 {
     public const string Type = "PublishPost";
@@ -22,7 +27,9 @@ public class PublishPostJobHandler : IJobHandler
 
     public string JobType => Type;
 
-    public async Task ExecuteAsync(string? payload)
+    public Task ExecuteAsync(string? payload) => ExecuteAsync(payload, CancellationToken.None);
+
+    public async Task ExecuteAsync(string? payload, CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(payload, out var postId))
         {
@@ -33,20 +40,29 @@ public class PublishPostJobHandler : IJobHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BlogContext>();
 
-        var post = await db.Posts.FindAsync(postId);
+        var post = await db.Posts.FindAsync([postId], cancellationToken);
         if (post is null)
         {
             _logger.LogWarning("Post {PostId} not found at execution time.", postId);
             return;
         }
 
+        if (post.Status == PostStatus.Published)
+        {
+            _logger.LogInformation("Post {PostId} is already published.", postId);
+            return;
+        }
+
         post.Status = PostStatus.Published;
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("Published post {PostId} ('{Title}').", post.Id, post.Title);
     }
 
-    public async Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync()
+    public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync()
+        => RecoverPendingJobsAsync(CancellationToken.None);
+
+    public async Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync(CancellationToken cancellationToken)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BlogContext>();
@@ -55,7 +71,7 @@ public class PublishPostJobHandler : IJobHandler
             .AsNoTracking()
             .Where(p => p.Status == PostStatus.Scheduled)
             .Select(p => new { p.Id, p.PublishAtUtc })
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         return pending.Select(p => new ScheduledJob(
             JobId: $"publish-{p.Id}",

@@ -15,7 +15,8 @@ public static class PostEndpoints
                 Id = Guid.NewGuid(),
                 Title = request.Title,
                 Body = request.Body,
-                PublishAtUtc = request.PublishAtUtc,
+                // The request carries an offset, so any time zone works; storage is always UTC.
+                PublishAtUtc = request.PublishAt.UtcDateTime,
                 Status = PostStatus.Scheduled
             };
 
@@ -35,10 +36,12 @@ public static class PostEndpoints
         .WithSummary("Create a scheduled post")
         .WithDescription("""
             Persists a `Post` in `Scheduled` state and arms a Tickless timer for the supplied
-            `publishAtUtc`. The job id (`publish-{postId}`) is stable across restarts, so if the
-            process dies before the timer fires, recovery picks up exactly where it left off.
+            `publishAt`, an ISO 8601 timestamp with an offset (for example `2026-11-10T14:30:00+02:00`
+            or `2026-11-10T12:30:00Z`). It is stored as UTC. The job id (`publish-{postId}`) is stable
+            across restarts, so if the process dies before the timer fires, recovery picks up exactly
+            where it left off.
 
-            Try a `publishAtUtc` 30-60 seconds in the future, then poll `/scheduler/jobs`.
+            Try a `publishAt` 30-60 seconds in the future, then poll `/scheduler/jobs`.
             """);
 
         app.MapGet("/posts", async (BlogContext db) =>
@@ -65,4 +68,4 @@ public static class PostEndpoints
     }
 }
 
-public record CreatePostRequest(string Title, string Body, DateTime PublishAtUtc);
+public record CreatePostRequest(string Title, string Body, DateTimeOffset PublishAt);
