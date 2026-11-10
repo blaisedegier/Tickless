@@ -26,7 +26,7 @@ namespace Tickless;
 public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
 {
     private readonly ConcurrentDictionary<string, ScheduledEntry> _scheduledJobs = new();
-    // Every execution task that has not finished yet: armed timers and running handlers.
+    // One completion per execution that has not finished yet: armed timers and running handlers.
     private readonly ConcurrentDictionary<Task, byte> _executions = new();
     // Cancelled by StopAsync. Every timer token is linked to it, and handlers receive its token.
     private readonly CancellationTokenSource _stopping = new();
@@ -92,7 +92,13 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             "Scheduled job '{JobId}' (type: {JobType}) to execute at {ExecuteAt:u} (in {Delay}).",
             jobId, jobType, executeAt, delay);
 
-        Track(ExecuteAfterDelayAsync(jobId, entry, delay, payload));
+        // Registered before the execution starts. An async method runs until its first await
+        // before it returns its task, and a timer that has already fired lets it run straight into
+        // the handler, so tracking that task afterwards leaves a window in which StopAsync's
+        // snapshot misses an execution that is already running.
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _executions.TryAdd(completion.Task, 0);
+        _ = ExecuteAfterDelayAsync(jobId, entry, delay, payload, completion);
 
         return Task.CompletedTask;
     }
@@ -187,17 +193,6 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
     }
 
-    private void Track(Task execution)
-    {
-        _executions.TryAdd(execution, 0);
-        _ = execution.ContinueWith(
-            static (finished, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(finished, out _),
-            _executions,
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
-    }
-
     // Whoever removes an entry from the map owns cancelling and disposing it.
     private bool CancelInternal(string jobId)
     {
@@ -209,7 +204,8 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         return false;
     }
 
-    private async Task ExecuteAfterDelayAsync(string jobId, ScheduledEntry entry, TimeSpan delay, string? payload)
+    private async Task ExecuteAfterDelayAsync(
+        string jobId, ScheduledEntry entry, TimeSpan delay, string? payload, TaskCompletionSource completion)
     {
         var token = entry.Token;
         try
@@ -272,6 +268,9 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             {
                 entry.Release();
             }
+
+            _executions.TryRemove(completion.Task, out _);
+            completion.SetResult();
         }
     }
 

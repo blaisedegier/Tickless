@@ -80,6 +80,25 @@ public class ShutdownTests
     }
 
     [Fact]
+    public async Task Execution_IsTrackedBeforeItRuns_SoStopAsyncCannotMissIt()
+    {
+        var time = new ImmediateTimeProvider();
+        var handler = new TestJobHandler();
+        var scheduler = new InProcessJobScheduler(
+            new[] { handler }, new RecordingLogger<InProcessJobScheduler>(), time);
+        var trackedWhenFired = -1;
+        // Runs inside ScheduleAsync, because the timer fires as soon as it is created. A StopAsync
+        // taking its snapshot at this moment must already see the execution.
+        scheduler.TimerFired = _ => trackedWhenFired = scheduler.InFlightExecutions;
+
+        await scheduler.ScheduleAsync("job-1", time.GetUtcNow().UtcDateTime.AddMinutes(1), "Test");
+
+        trackedWhenFired.Should().Be(1);
+        await handler.Executed.Task.WaitAsync(Patience);
+        await Wait.UntilAsync(() => scheduler.InFlightExecutions == 0);
+    }
+
+    [Fact]
     public async Task ScheduleAsync_AfterStop_DoesNotArm()
     {
         var handler = new TestJobHandler();
