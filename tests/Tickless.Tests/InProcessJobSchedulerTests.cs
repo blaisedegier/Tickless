@@ -1,5 +1,7 @@
 using AwesomeAssertions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Tickless.Tests;
 
@@ -7,6 +9,15 @@ public class InProcessJobSchedulerTests
 {
     private static InProcessJobScheduler CreateScheduler(params IJobHandler[] handlers)
         => new(handlers, NullLogger<InProcessJobScheduler>.Instance);
+
+    private static InProcessJobScheduler CreateScheduler(TimeProvider time, params IJobHandler[] handlers)
+        => new(handlers, NullLogger<InProcessJobScheduler>.Instance, time);
+
+    private static InProcessJobScheduler CreateScheduler(
+        TimeProvider time, ILogger<InProcessJobScheduler> logger, params IJobHandler[] handlers)
+        => new(handlers, logger, time);
+
+    private static DateTime Now(TimeProvider time) => time.GetUtcNow().UtcDateTime;
 
     [Fact]
     public async Task ScheduleAsync_FiresHandlerAtScheduledTime()
@@ -49,15 +60,16 @@ public class InProcessJobSchedulerTests
     [Fact]
     public async Task CancelAsync_PreventsHandlerFromFiring()
     {
+        var time = new FakeTimeProvider();
         var handler = new TestJobHandler();
-        var scheduler = CreateScheduler(handler);
+        var scheduler = CreateScheduler(time, handler);
 
-        await scheduler.ScheduleAsync("job-1", DateTime.UtcNow.AddMilliseconds(500), "Test");
+        await scheduler.ScheduleAsync("job-1", Now(time).AddMilliseconds(500), "Test");
         await scheduler.CancelAsync("job-1");
 
-        await Task.Delay(700);
+        time.Advance(TimeSpan.FromSeconds(1));
 
-        handler.Executed.Task.IsCompleted.Should().BeFalse();
+        handler.Payloads.Should().BeEmpty();
         scheduler.GetScheduled().Should().BeEmpty();
     }
 
@@ -86,14 +98,19 @@ public class InProcessJobSchedulerTests
     [Fact]
     public async Task HandlerException_DoesNotCrashSchedulerAndJobIsRemoved()
     {
+        var time = new FakeTimeProvider();
+        var logger = new RecordingLogger<InProcessJobScheduler>();
         var handler = new TestJobHandler { ShouldThrow = true };
-        var scheduler = CreateScheduler(handler);
+        var scheduler = CreateScheduler(time, logger, handler);
 
-        await scheduler.ScheduleAsync("job-1", DateTime.UtcNow.AddMilliseconds(50), "Test");
+        await scheduler.ScheduleAsync("job-1", Now(time).AddMilliseconds(50), "Test");
+        scheduler.GetScheduled().Should().ContainSingle();
 
-        await Task.Delay(300);
+        time.Advance(TimeSpan.FromMilliseconds(50));
 
-        scheduler.GetScheduled().Should().BeEmpty();
+        await Wait.UntilAsync(() => scheduler.GetScheduled().Count == 0);
+        handler.Payloads.Should().ContainSingle();
+        logger.Entries.Should().Contain(e => e.Level == LogLevel.Error && e.Exception is InvalidOperationException);
     }
 
     [Fact]

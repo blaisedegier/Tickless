@@ -21,6 +21,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     private readonly ConcurrentDictionary<string, ScheduledEntry> _scheduledJobs = new();
     private readonly Dictionary<string, IJobHandler> _handlers;
     private readonly ILogger<InProcessJobScheduler> _logger;
+    private readonly TimeProvider _time;
 
     /// <summary>
     /// Creates a new in-process scheduler. Handlers are typically registered via DI; the constructor
@@ -29,8 +30,19 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     public InProcessJobScheduler(
         IEnumerable<IJobHandler> handlers,
         ILogger<InProcessJobScheduler> logger)
+        : this(handlers, logger, TimeProvider.System)
+    {
+    }
+
+    // Tests substitute a FakeTimeProvider here. DI only sees public constructors, so the public
+    // surface stays the same as 1.0.
+    internal InProcessJobScheduler(
+        IEnumerable<IJobHandler> handlers,
+        ILogger<InProcessJobScheduler> logger,
+        TimeProvider timeProvider)
     {
         _logger = logger;
+        _time = timeProvider;
         _handlers = handlers.ToDictionary(h => h.JobType);
     }
 
@@ -51,7 +63,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         var entry = new ScheduledEntry(cts, executeAtUtc, jobType);
         _scheduledJobs[jobId] = entry;
 
-        var delay = executeAtUtc - DateTime.UtcNow;
+        var delay = executeAtUtc - _time.GetUtcNow().UtcDateTime;
         if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
 
         _logger.LogInformation(
@@ -125,7 +137,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         {
             foreach (var chunk in ChunkDelay(delay))
             {
-                await Task.Delay(chunk, ct);
+                await Task.Delay(chunk, _time, ct);
             }
 
             if (!_handlers.TryGetValue(jobType, out var handler))
