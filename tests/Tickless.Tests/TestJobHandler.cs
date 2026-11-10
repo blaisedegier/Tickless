@@ -71,3 +71,26 @@ internal sealed class LegacyJobHandler : IJobHandler
 
     public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync() => Task.FromResult(RecoveryJobs);
 }
+
+/// <summary>
+/// Behaves like a mocking proxy that intercepts the token overloads without calling their default
+/// implementations and has nothing set up for them, so they return null.
+/// </summary>
+internal sealed class NullReturningJobHandler : IJobHandler
+{
+    public NullReturningJobHandler(string jobType)
+    {
+        JobType = jobType;
+    }
+
+    public string JobType { get; }
+
+    public Task ExecuteAsync(string? payload) => Task.CompletedTask;
+
+    public Task ExecuteAsync(string? payload, CancellationToken cancellationToken) => null!;
+
+    public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync()
+        => Task.FromResult(Enumerable.Empty<ScheduledJob>());
+
+    public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync(CancellationToken cancellationToken) => null!;
+}

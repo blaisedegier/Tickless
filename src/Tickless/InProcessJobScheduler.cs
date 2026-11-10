@@ -30,6 +30,8 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
     private readonly ConcurrentDictionary<Task, byte> _executions = new();
     // Cancelled by StopAsync. Every timer token is linked to it, and handlers receive its token.
     private readonly CancellationTokenSource _stopping = new();
+    // Job type and method pairs already warned about returning a null task, so each warns once.
+    private readonly ConcurrentDictionary<(string JobType, string Method), byte> _nullTaskWarnings = new();
     private readonly Dictionary<string, IJobHandler> _handlers;
     private readonly ILogger<InProcessJobScheduler> _logger;
     private readonly TimeProvider _time;
@@ -243,7 +245,15 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             {
                 // The handler gets the scheduler-wide stopping token, not this entry's timer token:
                 // rescheduling or cancelling a job affects its timer, never a handler already running.
-                await _handlers[entry.JobType].ExecuteAsync(payload, _stopping.Token).ConfigureAwait(false);
+                var execution = _handlers[entry.JobType].ExecuteAsync(payload, _stopping.Token);
+                if (execution is null)
+                {
+                    WarnNullTask(entry.JobType, "ExecuteAsync(string?, CancellationToken)");
+                }
+                else
+                {
+                    await execution.ConfigureAwait(false);
+                }
                 _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
             }
             catch (OperationCanceledException ex) when (_stopping.IsCancellationRequested)
@@ -274,6 +284,22 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
     }
 
+    // A mock of IJobHandler set up only for the 1.0 overloads can return null from the overloads
+    // the scheduler calls, because the proxy intercepts them instead of running their default
+    // implementations. Treating null as "nothing to do" keeps such a test double from failing
+    // every job; the warning says why the 1.0 setup never ran.
+    private void WarnNullTask(string jobType, string method)
+    {
+        if (_nullTaskWarnings.TryAdd((jobType, method), 0))
+        {
+            _logger.LogWarning(
+                "The handler for job type '{JobType}' returned null from {Method}; treated as having nothing to do. " +
+                "A mock set up only for the Tickless 1.0 overloads does this: set up the CancellationToken overloads " +
+                "or let the mock call their default implementations. See 'Upgrading from 1.0' in the README.",
+                jobType, method);
+        }
+    }
+
     /// <summary>
     /// Recovers pending work by calling each handler's
     /// <see cref="IJobHandler.RecoverPendingJobsAsync(CancellationToken)"/> and scheduling what it returns.
@@ -294,7 +320,13 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var pending = (await handler.RecoverPendingJobsAsync(cancellationToken).ConfigureAwait(false)).ToList();
+                var recovery = handler.RecoverPendingJobsAsync(cancellationToken);
+                var recovered = recovery is null ? null : await recovery.ConfigureAwait(false);
+                if (recovered is null)
+                {
+                    WarnNullTask(handler.JobType, "RecoverPendingJobsAsync(CancellationToken)");
+                }
+                var pending = recovered?.ToList() ?? [];
                 foreach (var job in pending)
                 {
                     await ScheduleAsync(job.JobId, job.ExecuteAtUtc, handler.JobType, job.Payload).ConfigureAwait(false);
