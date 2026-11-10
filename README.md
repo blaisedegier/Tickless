@@ -1,43 +1,71 @@
 # Tickless
 
-> An event-driven, in-process job scheduler for .NET that owns no tables.
+An event-driven, in-process job scheduler for .NET that owns no tables: jobs fire at their exact time, and after a restart each handler rebuilds its own timers from your domain rows.
 
 [![NuGet](https://img.shields.io/nuget/v/Tickless.svg)](https://www.nuget.org/packages/Tickless)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![.NET](https://img.shields.io/badge/.NET-10-blueviolet.svg)](https://dotnet.microsoft.com/)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](https://github.com/blaisedegier/Tickless/blob/main/LICENSE)
 [![CI](https://github.com/blaisedegier/Tickless/actions/workflows/ci.yml/badge.svg)](https://github.com/blaisedegier/Tickless/actions/workflows/ci.yml)
 
-## 📑 Table of Contents
+## What it does
 
-- [💡 The Idea](#-the-idea)
-- [📦 Install](#-install)
-- [⚡ Quick Start](#-quick-start)
-- [🔁 How Recovery Works](#-how-recovery-works)
-- [🔍 Inspecting Scheduled Jobs](#-inspecting-scheduled-jobs)
-- [⚖️ Comparison](#️-comparison)
-- [🚫 When NOT to Use This](#-when-not-to-use-this)
-- [🎬 Demo](#-demo)
-- [📁 Project Structure](#-project-structure)
-- [🛠️ Building from Source](#️-building-from-source)
-- [📄 License](#-license)
+- Runs a piece of work at a given UTC instant: publish a post at `PublishAtUtc`, expire a trial at `TrialExpiresAtUtc`, lift a cooldown at `CooldownExpiresAtUtc`.
+- Fires on a timer, not on a polling loop, so nothing runs between jobs.
+- Survives restarts without a table of its own. On startup it asks each handler what is still pending, and the handler answers from the rows your application already stores.
+- Replaces a job when you schedule the same id again, cancels by id, and lists what is armed (without payloads) for an admin endpoint.
+- Passes a cancellation token to handlers and drains running work on shutdown.
 
-## 💡 The Idea
+## How it works
 
-Most job schedulers solve durability by adding their own tables. A job table, a state table, a queue table, plus a few more on top. Tickless takes a different route. The deadline you care about almost always already lives in your domain: `TrialExpiresAtUtc`, `PublishAtUtc`, `CooldownExpiresAtUtc`, and so on. On startup, each handler queries that domain state and tells the scheduler what is still outstanding. Tickless rehydrates its timers from there. There is nothing extra to migrate, nothing extra to back up, and nothing else to keep in sync.
+### Your domain rows are the queue
 
-In short: your domain state is the queue.
+Most schedulers get durability by adding their own job, state and queue tables. Tickless does not persist anything. A scheduled job is an in-memory timer keyed by a job id. Durability comes from the contract on `IJobHandler`: at startup the scheduler calls each handler's `RecoverPendingJobsAsync`, the handler queries its own tables for outstanding work (typically a `Status` filter plus a due-time column), and the scheduler re-arms a timer for each result.
 
-## 📦 Install
+If the process dies while timers are armed, the next start runs the same query and the timers come back. Nothing extra needs migrating, backing up or keeping in sync, because the only state is the rows you were already saving.
+
+### Delivery guarantees
+
+Delivery is **at-least-once**, provided recovery reports every row that is still pending:
+
+- A handler that throws is logged and the job is dropped from memory. There is no in-process retry or backoff. If the handler did not mark its row done, the row is still pending, so recovery schedules it again on the next start.
+- A handler interrupted by shutdown is in the same position: it runs again on the next start.
+- A handler can therefore run more than once for the same row (for example after sending an email but before saving the status change). **Handlers must be idempotent**: check the row's state before acting, as the sample does with `Published` posts.
+
+Work that has no pending row behind it is not recovered. That is the trade-off for owning no schema.
+
+### Cancellation and shutdown
+
+`IJobHandler` has two pairs of methods. The scheduler always calls the overloads that take a `CancellationToken`:
+
+```csharp
+Task ExecuteAsync(string? payload, CancellationToken cancellationToken);
+Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync(CancellationToken cancellationToken);
+```
+
+Both are default interface methods that ignore the token and call the original 1.0 methods, `ExecuteAsync(string?)` and `RecoverPendingJobsAsync()`. A handler written against 1.0 therefore compiles and runs unchanged. A new handler implements the token overloads and forwards the 1.0 ones to them, as shown below.
+
+On shutdown the scheduler cancels every timer, signals the token passed to running handlers, and waits for them to finish. It waits for as long as the host allows, which is `HostOptions.ShutdownTimeout` (30 seconds by default). Handlers still running after that are abandoned with a logged warning; their rows are still pending, so they run again on the next start. Once stopping has begun, `ScheduleAsync` logs a warning and schedules nothing.
+
+The handler's token is signalled only by shutdown. Rescheduling or cancelling a job affects its timer, never a handler that is already running.
+
+### Times are UTC
+
+`ScheduleAsync` and `ScheduledJob` take a `DateTime`. A value with `DateTimeKind.Local` is converted to UTC. A value with `DateTimeKind.Unspecified` is treated as UTC, because that is how EF Core and most ADO.NET providers read a UTC column back; rejecting it would break recovery. `GetScheduled()` always reports `Kind=Utc`. Store due times as UTC and this rule never surprises you.
+
+### Errors at schedule time
+
+Scheduling a job type that has no registered handler throws `ArgumentException` (parameter `jobType`), naming the registered types. It is thrown before anything else happens, so an existing job with the same id stays scheduled.
+
+## Running it
+
+### Install
 
 ```bash
 dotnet add package Tickless
 ```
 
-Targets `net10.0`. The package brings in only the abstractions for hosting, DI, and logging, so it adds no infrastructure dependencies of its own.
+The package targets `net10.0` and depends only on the hosting, dependency injection and logging abstractions.
 
-## ⚡ Quick Start
-
-### 1. Register Tickless and your handler
+### Register Tickless and a handler
 
 ```csharp
 // Program.cs
@@ -46,35 +74,51 @@ builder.Services.AddTickless();
 builder.Services.AddSingleton<IJobHandler, PublishPostJobHandler>();
 ```
 
-### 2. Implement the handler
+### Implement the handler
+
+Handlers are singletons, so they create a scope for scoped services such as a `DbContext`.
 
 ```csharp
 public class PublishPostJobHandler(IServiceProvider services) : IJobHandler
 {
     public string JobType => "PublishPost";
 
-    public async Task ExecuteAsync(string? payload)
+    public Task ExecuteAsync(string? payload) => ExecuteAsync(payload, CancellationToken.None);
+
+    public async Task ExecuteAsync(string? payload, CancellationToken cancellationToken)
     {
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BlogContext>();
-        var post = await db.Posts.FindAsync(Guid.Parse(payload!));
-        post!.Status = "Published";
-        await db.SaveChangesAsync();
+        var post = await db.Posts.FindAsync([Guid.Parse(payload!)], cancellationToken);
+        if (post is null || post.Status == "Published")
+        {
+            return; // Idempotent: a second run does nothing.
+        }
+        post.Status = "Published";
+        await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync()
+    public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync()
+        => RecoverPendingJobsAsync(CancellationToken.None);
+
+    public async Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync(CancellationToken cancellationToken)
     {
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BlogContext>();
-        return (await db.Posts.Where(p => p.Status == "Scheduled").ToListAsync())
-            .Select(p => new ScheduledJob($"publish-{p.Id}", p.PublishAtUtc, p.Id.ToString()));
+        var pending = await db.Posts
+            .Where(p => p.Status == "Scheduled")
+            .Select(p => new { p.Id, p.PublishAtUtc })
+            .ToListAsync(cancellationToken);
+        return pending.Select(p => new ScheduledJob($"publish-{p.Id}", p.PublishAtUtc, p.Id.ToString()));
     }
 }
 ```
 
-### 3. Schedule work
+Recovery runs inside the hosted service's `StartAsync`, which the host awaits while starting, so a slow recovery query delays startup. Keep it a cheap query over an indexed status or due-time column.
 
-Anywhere you have `IJobScheduler` injected:
+### Schedule, cancel and inspect
+
+Anywhere `IJobScheduler` is injected:
 
 ```csharp
 await scheduler.ScheduleAsync(
@@ -82,92 +126,63 @@ await scheduler.ScheduleAsync(
     executeAtUtc: post.PublishAtUtc,
     jobType:      "PublishPost",
     payload:      post.Id.ToString());
+
+await scheduler.CancelAsync($"publish-{post.Id}");
+
+app.MapGet("/scheduler/jobs", (IJobScheduler s) => s.GetScheduled());
 ```
 
-That is the whole API surface for scheduling. Cancel by id with `CancelAsync(jobId)`; replacement is idempotent (re-scheduling the same id cancels the previous timer).
+Scheduling an id that already exists replaces the earlier job. A time in the past fires as soon as possible, on the thread pool rather than the caller's thread. `GetScheduled()` returns `JobId`, `ExecuteAtUtc` and `JobType` for each armed timer; payloads are left out so the list is safe to expose to an admin page.
 
-## 🔁 How Recovery Works
+### The sample
 
-When the host starts, Tickless calls `RecoverPendingJobsAsync` on every registered handler. Each handler returns the work it knows is still outstanding, derived from a query against its own domain tables. Tickless rearms timers for those jobs and resumes.
-
-If the process dies while jobs are armed, restarting it re-runs the same query and the timers come back. There is no in-flight state to corrupt, because there is no in-flight state at all. Only the domain rows you were already saving.
-
-## 🔍 Inspecting Scheduled Jobs
-
-```csharp
-app.MapGet("/scheduler/jobs", (IJobScheduler scheduler) => scheduler.GetScheduled());
-```
-
-`GetScheduled()` returns a snapshot of currently armed timers as `IReadOnlyCollection<ScheduledJobView>` (`JobId`, `ExecuteAtUtc`, `JobType`). Payloads are intentionally omitted so this is safe to wire to an admin endpoint.
-
-## ⚖️ Comparison
-
-|                            |     Tickless      |    Hangfire    |    Quartz.NET    | Coravel | Raw BackgroundService |
-| :------------------------- | :---------------: | :------------: | :--------------: | :-----: | :-------------------: |
-| Owns a database schema     |        No         |   Yes (many)   |       Yes        |   Yes   |          No           |
-| Polls between jobs         |        No         |      Yes       |       Yes        |   Yes   |       Up to you       |
-| Recovers across restarts   | Yes (your domain) |      Yes       |       Yes        |   Yes   |          No           |
-| Multi-instance / scale-out |        No         |      Yes       |       Yes        |   No    |          No           |
-| Built-in inspection        |     Endpoint      |    Full UI     |     Limited      | Limited |         None          |
-| External infrastructure    |       None        | Optional Redis | Optional cluster |  None   |         None          |
-
-## 🚫 When NOT to Use This
-
-- **You run more than one host instance.** Two replicas will each fire every job. Tickless has no leader election or distributed locking. Reach for Hangfire or Quartz, or a queue-backed scheduler (Azure Service Bus or AWS SQS scheduled messages) for horizontally scaled deployments.
-- **You need sub-second precision.** `Task.Delay` is best-effort under thread-pool starvation and GC pauses. Accuracy at human scale (seconds, minutes, days) is fine. Real-time systems are not.
-- **You need cross-service messaging.** Tickless schedules work for a handler in the same process. If service A schedules work that should run on service B, use a message bus.
-- **Your deadlines do not exist as durable rows.** The whole pattern hinges on each handler being able to ask "what is pending?" against your domain. Without a domain row backing each job, recovery has nothing to read.
-
-## 🎬 Demo
-
-A runnable sample lives in [`samples/Tickless.Sample.BlogPublishing`](./samples/Tickless.Sample.BlogPublishing) - a minimal API with SQLite and a [Scalar](https://scalar.com) UI. Schedule a post for 60 seconds out, hit Ctrl+C mid-wait, restart, watch the timer rearm and the post publish on time.
+[`samples/Tickless.Sample.BlogPublishing`](https://github.com/blaisedegier/Tickless/tree/main/samples/Tickless.Sample.BlogPublishing) is a minimal API over SQLite with a [Scalar](https://scalar.com) UI. Schedule a post a minute out, stop the process before it fires, start it again, and the timer is re-armed from the `Posts` table and the post publishes on time.
 
 ```bash
 dotnet run --project samples/Tickless.Sample.BlogPublishing
 ```
 
-Then open <http://localhost:5009/scalar/v1>. The Scalar page doubles as the demo's introduction, with a "Try it in 60 seconds" walkthrough that exercises the recovery path directly from the browser.
+Then open <http://localhost:5009/scalar/v1>. `POST /posts` takes `publishAt` as an ISO 8601 timestamp with an offset (for example `2026-11-10T14:30:00+02:00`) and stores it as UTC.
 
-## 📁 Project Structure
-
-```text
-Tickless/
-  src/
-    Tickless/                              The package
-      IJobScheduler.cs                     Public contract: ScheduleAsync, CancelAsync, GetScheduled
-      IJobHandler.cs                       Per-job-type contract: ExecuteAsync, RecoverPendingJobsAsync
-      ScheduledJob.cs                      Recovery DTO returned from RecoverPendingJobsAsync
-      ScheduledJobView.cs                  Read-only inspection record returned from GetScheduled
-      InProcessJobScheduler.cs             ConcurrentDictionary + Task.Delay implementation
-      ServiceCollectionExtensions.cs       AddTickless() DI helper
-  samples/
-    Tickless.Sample.BlogPublishing/        Minimal API demo (SQLite + EF Core + Scalar UI)
-  tests/
-    Tickless.Tests/                        xUnit + AwesomeAssertions (18 tests)
-  .github/workflows/
-    ci.yml                                 Build + test on push and PR
-    release.yml                            Pack + publish on v* tags
-```
-
-## 🛠️ Building from Source
+### Building from source
 
 Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 
 ```bash
 git clone https://github.com/blaisedegier/Tickless.git
 cd Tickless
-dotnet build
-dotnet test
-```
-
-To produce the NuGet package locally:
-
-```bash
+dotnet build Tickless.slnx -c Release
+dotnet test Tickless.slnx -c Release
 dotnet pack src/Tickless/Tickless.csproj -c Release -o ./artifacts
 ```
 
-The release pipeline is tag-driven. Push a tag matching `v*` (e.g. `v1.0.1`) and GitHub Actions builds, tests, packs with the version derived from the tag, and pushes to NuGet. The repo secret `NUGET_API_KEY` must be set.
+`dotnet pack` runs package validation against the published 1.0.0 and fails on a binary-breaking API change. Releases are tag-driven: pushing a `v*` tag runs the tests, packs with the version taken from the tag, and publishes to NuGet. Changes per version are in the [changelog](https://github.com/blaisedegier/Tickless/blob/main/CHANGELOG.md).
 
-## 📄 License
+## How it compares
 
-MIT - see [LICENSE](LICENSE).
+These statements describe each project's default configuration as of November 2026; see each project's documentation for current behaviour.
+
+- **Hangfire** always needs a job storage. Its persistent storages ([SQL Server, Redis](https://docs.hangfire.io/en/latest/configuration/index.html)) keep jobs in tables or keys that Hangfire creates and owns, and the server finds delayed jobs by [polling that storage, every 15 seconds by default](https://docs.hangfire.io/en/latest/background-methods/calling-methods-with-delay.html). It supports several servers sharing one storage and ships a dashboard.
+- **Quartz.NET** defaults to [`RAMJobStore`](https://www.quartz-scheduler.net/documentation/quartz-3.x/tutorial/job-stores.html), which keeps schedules in memory, so they are lost when the application stops or crashes. Durable scheduling uses `AdoJobStore`, which needs Quartz's own database tables.
+- **Coravel** owns no schema. Its [scheduler](https://docs.coravel.net/Scheduler/) runs recurring tasks defined in code, and its [queue](https://docs.coravel.net/Queuing/) runs in memory, so queued work that has not run yet is lost on restart.
+- **Tickless** owns no schema and does not poll. One-off jobs fire on their own timer, and durability comes from your domain rows through recovery. It runs in a single process only.
+
+Hangfire, and Quartz.NET with a persistent store, both run across several instances, and Hangfire also retries failed jobs and has a dashboard; reach for them when you need that. Tickless fits a single-instance app whose deadlines already live in its own tables.
+
+## Tech
+
+.NET 10 class library depending only on `Microsoft.Extensions.Hosting.Abstractions`, `Microsoft.Extensions.DependencyInjection.Abstractions` and `Microsoft.Extensions.Logging.Abstractions`. Tests use xUnit, AwesomeAssertions and `FakeTimeProvider`. The sample uses ASP.NET Core minimal APIs, EF Core with SQLite, and Scalar.
+
+## Known limitations
+
+- **Single instance only.** Two replicas of the host each fire every job. There is no leader election or distributed lock; use Hangfire, Quartz.NET clustering or a broker's scheduled messages for scale-out.
+- **No retries.** A failed handler is logged and dropped until the next start; there is no backoff or in-process retry.
+- **Best-effort precision.** Timers are `Task.Delay`, which is accurate to human scale (seconds and up) but not real-time under thread-pool starvation or long GC pauses.
+- **Recovery is bounded by startup.** Every pending job is recovered during startup and holds a timer in memory until it fires, so a very large backlog costs startup time and memory.
+- **Same process only.** A job runs in the process that scheduled it; cross-service work belongs on a message bus.
+- **Every job needs a durable row.** Work with no pending row behind it cannot be recovered after a restart.
+- **String payloads.** Serialise anything richer yourself.
+
+## Licence
+
+MIT. See [LICENSE](https://github.com/blaisedegier/Tickless/blob/main/LICENSE).
