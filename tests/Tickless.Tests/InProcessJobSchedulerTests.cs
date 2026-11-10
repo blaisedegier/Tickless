@@ -219,6 +219,27 @@ public class InProcessJobSchedulerTests
     }
 
     [Fact]
+    public async Task ScheduleAsync_ConcurrentSameId_LeavesExactlyOneTimer()
+    {
+        var time = new FakeTimeProvider();
+        var handler = new TestJobHandler();
+        var scheduler = CreateScheduler(time, handler);
+        var dueAt = Now(time).AddMinutes(1);
+
+        await Parallel.ForAsync(0, 200, async (i, _) =>
+            await scheduler.ScheduleAsync("job-1", dueAt, "Test", i.ToString()));
+
+        scheduler.GetScheduled().Should().ContainSingle();
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        await Wait.UntilAsync(() => scheduler.InFlightExecutions == 0);
+
+        // A replaced entry whose timer was never cancelled would fire here as a second execution.
+        handler.Payloads.Should().ContainSingle();
+        scheduler.GetScheduled().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task LegacyHandler_StillExecutesViaDefaultOverload()
     {
         var handler = new LegacyJobHandler
