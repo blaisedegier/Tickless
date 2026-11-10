@@ -141,7 +141,7 @@ public class InProcessJobSchedulerTests
         var time = new FakeTimeProvider();
         var logger = new RecordingLogger<InProcessJobScheduler>();
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var handler = new TestJobHandler { OnExecute = _ => gate.Task };
+        var handler = new TestJobHandler { OnExecute = (_, _) => gate.Task };
         var scheduler = CreateScheduler(time, logger, handler);
 
         await scheduler.ScheduleAsync("job-1", Now(time), "Test", "first");
@@ -169,7 +169,7 @@ public class InProcessJobSchedulerTests
         var time = new FakeTimeProvider();
         var logger = new RecordingLogger<InProcessJobScheduler>();
         // For example an HttpClient timeout, which surfaces as TaskCanceledException.
-        var handler = new TestJobHandler { OnExecute = _ => throw new TaskCanceledException("timed out") };
+        var handler = new TestJobHandler { OnExecute = (_, _) => throw new TaskCanceledException("timed out") };
         var scheduler = CreateScheduler(time, logger, handler);
 
         await scheduler.ScheduleAsync("job-1", Now(time).AddSeconds(1), "Test");
@@ -216,6 +216,24 @@ public class InProcessJobSchedulerTests
         handler.Payloads.Should().BeEmpty();
         time.Advance(TimeSpan.FromMinutes(1));
         (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("payload");
+    }
+
+    [Fact]
+    public async Task LegacyHandler_StillExecutesViaDefaultOverload()
+    {
+        var handler = new LegacyJobHandler
+        {
+            RecoveryJobs = new[] { new ScheduledJob("recovered", DateTime.UtcNow.AddMinutes(5), null) },
+        };
+        var scheduler = CreateScheduler(handler);
+
+        await scheduler.StartAsync(default);
+        scheduler.GetScheduled().Should().ContainSingle().Which.JobId.Should().Be("recovered");
+
+        await scheduler.ScheduleAsync("job-1", DateTime.UtcNow, "Legacy", "payload");
+        (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("payload");
+
+        await scheduler.StopAsync(default);
     }
 
     [Fact]

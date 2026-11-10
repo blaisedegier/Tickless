@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 
 namespace Tickless.Tests;
 
+/// <summary>A handler that implements the cancellation-aware overloads, as new handlers should.</summary>
 internal sealed class TestJobHandler : IJobHandler
 {
     public string JobType { get; }
@@ -10,17 +11,25 @@ internal sealed class TestJobHandler : IJobHandler
     public ConcurrentQueue<string?> Payloads { get; } = new();
     public IEnumerable<ScheduledJob> RecoveryJobs { get; init; } = Array.Empty<ScheduledJob>();
     public bool ShouldThrow { get; init; }
+    public CancellationToken ExecutionToken { get; private set; }
+    public CancellationToken RecoveryToken { get; private set; }
 
     /// <summary>Optional extra work run after the payload is recorded, for example waiting on a gate.</summary>
-    public Func<string?, Task>? OnExecute { get; init; }
+    public Func<string?, CancellationToken, Task>? OnExecute { get; init; }
+
+    /// <summary>Optional work run during recovery, before the recovery jobs are returned.</summary>
+    public Func<CancellationToken, Task>? OnRecover { get; init; }
 
     public TestJobHandler(string jobType = "Test")
     {
         JobType = jobType;
     }
 
-    public async Task ExecuteAsync(string? payload)
+    public Task ExecuteAsync(string? payload) => ExecuteAsync(payload, CancellationToken.None);
+
+    public async Task ExecuteAsync(string? payload, CancellationToken cancellationToken)
     {
+        ExecutionToken = cancellationToken;
         Payloads.Enqueue(payload);
         Started.TrySetResult();
         if (ShouldThrow)
@@ -29,9 +38,35 @@ internal sealed class TestJobHandler : IJobHandler
         }
         if (OnExecute is not null)
         {
-            await OnExecute(payload);
+            await OnExecute(payload, cancellationToken);
         }
         Executed.TrySetResult(payload);
+    }
+
+    public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync() => RecoverPendingJobsAsync(CancellationToken.None);
+
+    public async Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync(CancellationToken cancellationToken)
+    {
+        RecoveryToken = cancellationToken;
+        if (OnRecover is not null)
+        {
+            await OnRecover(cancellationToken);
+        }
+        return RecoveryJobs;
+    }
+}
+
+/// <summary>A handler written against Tickless 1.0: it implements only the original overloads.</summary>
+internal sealed class LegacyJobHandler : IJobHandler
+{
+    public string JobType => "Legacy";
+    public TaskCompletionSource<string?> Executed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public IEnumerable<ScheduledJob> RecoveryJobs { get; init; } = Array.Empty<ScheduledJob>();
+
+    public Task ExecuteAsync(string? payload)
+    {
+        Executed.TrySetResult(payload);
+        return Task.CompletedTask;
     }
 
     public Task<IEnumerable<ScheduledJob>> RecoverPendingJobsAsync() => Task.FromResult(RecoveryJobs);

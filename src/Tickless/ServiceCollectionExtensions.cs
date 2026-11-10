@@ -19,7 +19,7 @@ public static class ServiceCollectionExtensions
     /// services.AddSingleton&lt;IJobHandler, MyJobHandler&gt;();
     /// </code>
     /// All registered <see cref="IJobHandler"/>s are resolved via DI and made available to the
-    /// scheduler. On host startup, each handler's <see cref="IJobHandler.RecoverPendingJobsAsync"/>
+    /// scheduler. On host startup, each handler's <see cref="IJobHandler.RecoverPendingJobsAsync(CancellationToken)"/>
     /// is invoked to rehydrate timers from domain state.
     /// </remarks>
     public static IServiceCollection AddTickless(this IServiceCollection services)

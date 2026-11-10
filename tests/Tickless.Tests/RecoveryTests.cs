@@ -76,7 +76,7 @@ public class RecoveryTests
         {
             RecoveryJobs = new[] { new ScheduledJob("overdue", DateTime.UtcNow.AddHours(-1), "late") },
             // Blocks synchronously, so a handler running on the caller's thread would hold up StartAsync.
-            OnExecute = _ =>
+            OnExecute = (_, _) =>
             {
                 gate.Wait(TimeSpan.FromSeconds(10));
                 return Task.CompletedTask;
@@ -95,5 +95,56 @@ public class RecoveryTests
         }
 
         (await handler.Executed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("late");
+    }
+
+    [Fact]
+    public async Task StartAsync_PassesTokenToRecovery()
+    {
+        var handler = new TestJobHandler();
+        var scheduler = CreateScheduler(handler);
+        using var startup = new CancellationTokenSource();
+
+        await scheduler.StartAsync(startup.Token);
+
+        handler.RecoveryToken.Should().Be(startup.Token);
+    }
+
+    [Fact]
+    public async Task StartAsync_CancelledToken_Throws()
+    {
+        var handler = new TestJobHandler
+        {
+            RecoveryJobs = new[] { new ScheduledJob("job-1", DateTime.UtcNow.AddMinutes(1), null) },
+        };
+        var scheduler = CreateScheduler(handler);
+        using var startup = new CancellationTokenSource();
+        startup.Cancel();
+
+        var act = () => scheduler.StartAsync(startup.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        scheduler.GetScheduled().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task StartAsync_CancelledDuringRecovery_Throws()
+    {
+        using var startup = new CancellationTokenSource();
+        var handler = new TestJobHandler
+        {
+            RecoveryJobs = new[] { new ScheduledJob("job-1", DateTime.UtcNow.AddMinutes(1), null) },
+            OnRecover = async ct =>
+            {
+                await startup.CancelAsync();
+                ct.ThrowIfCancellationRequested();
+            },
+        };
+        var scheduler = CreateScheduler(handler);
+
+        var act = () => scheduler.StartAsync(startup.Token);
+
+        // Rethrown, rather than logged as a failed recovery and skipped.
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        scheduler.GetScheduled().Should().BeEmpty();
     }
 }

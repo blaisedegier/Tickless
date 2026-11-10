@@ -9,16 +9,27 @@ namespace Tickless;
 /// <see cref="ConcurrentDictionary{TKey,TValue}"/> and <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.
 /// Event-driven within a single process: jobs fire at their exact scheduled instant without polling.
 /// On startup, recovers pending jobs from the database via each registered
-/// <see cref="IJobHandler"/>'s <see cref="IJobHandler.RecoverPendingJobsAsync"/>.
+/// <see cref="IJobHandler"/>'s <see cref="IJobHandler.RecoverPendingJobsAsync(CancellationToken)"/>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Single-instance only. Two replicas of the host will both fire every job. For horizontally
 /// scaled deployments, pair this scheduler with a leader-election mechanism or use a queue-backed
 /// alternative (Hangfire, Quartz, or Azure Service Bus scheduled messages).
+/// </para>
+/// <para>
+/// On shutdown, <see cref="StopAsync"/> cancels every timer, signals the cancellation token passed
+/// to running handlers, and waits for them to finish for as long as the host allows
+/// (<c>HostOptions.ShutdownTimeout</c>).
+/// </para>
 /// </remarks>
 public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
 {
     private readonly ConcurrentDictionary<string, ScheduledEntry> _scheduledJobs = new();
+    // Every execution task that has not finished yet: armed timers and running handlers.
+    private readonly ConcurrentDictionary<Task, byte> _executions = new();
+    // Cancelled by StopAsync. Every timer token is linked to it, and handlers receive its token.
+    private readonly CancellationTokenSource _stopping = new();
     private readonly Dictionary<string, IJobHandler> _handlers;
     private readonly ILogger<InProcessJobScheduler> _logger;
     private readonly TimeProvider _time;
@@ -63,8 +74,15 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
                 nameof(jobType));
         }
 
+        if (_stopping.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Tickless is stopping; job '{JobId}' (type: {JobType}) was not scheduled.", jobId, jobType);
+            return Task.CompletedTask;
+        }
+
         var executeAt = NormalizeToUtc(executeAtUtc);
-        var entry = new ScheduledEntry(executeAt, jobType);
+        var entry = new ScheduledEntry(executeAt, jobType, _stopping.Token);
         Install(jobId, entry);
 
         var delay = executeAt - _time.GetUtcNow().UtcDateTime;
@@ -74,7 +92,7 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             "Scheduled job '{JobId}' (type: {JobType}) to execute at {ExecuteAt:u} (in {Delay}).",
             jobId, jobType, executeAt, delay);
 
-        _ = ExecuteAfterDelayAsync(jobId, entry, delay, payload);
+        Track(ExecuteAfterDelayAsync(jobId, entry, delay, payload));
 
         return Task.CompletedTask;
     }
@@ -97,6 +115,11 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             .ToList()
             .AsReadOnly();
     }
+
+    /// <summary>
+    /// Execution tasks that have not finished: armed timers plus running handlers. Exposed for tests.
+    /// </summary>
+    internal int InFlightExecutions => _executions.Count;
 
     /// <summary>
     /// Returns the same instant with <see cref="DateTimeKind.Utc"/>. A <see cref="DateTimeKind.Local"/>
@@ -158,6 +181,17 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
     }
 
+    private void Track(Task execution)
+    {
+        _executions.TryAdd(execution, 0);
+        _ = execution.ContinueWith(
+            static (finished, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(finished, out _),
+            _executions,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     // Whoever removes an entry from the map owns cancelling and disposing it.
     private bool CancelInternal(string jobId)
     {
@@ -191,15 +225,25 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                // The timer was cancelled before it fired: the job was replaced or cancelled.
+                // The timer was cancelled before it fired: the job was replaced or cancelled, or
+                // the scheduler is stopping.
                 return;
             }
 
             _logger.LogInformation("Executing job '{JobId}' (type: {JobType}).", jobId, entry.JobType);
             try
             {
-                await _handlers[entry.JobType].ExecuteAsync(payload).ConfigureAwait(false);
+                // The handler gets the scheduler-wide stopping token, not this entry's timer token:
+                // rescheduling or cancelling a job affects its timer, never a handler already running.
+                await _handlers[entry.JobType].ExecuteAsync(payload, _stopping.Token).ConfigureAwait(false);
                 _logger.LogInformation("Job '{JobId}' completed successfully.", jobId);
+            }
+            catch (OperationCanceledException ex) when (_stopping.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Job '{JobId}' (type: {JobType}) was interrupted by shutdown. It runs again on the next start if recovery still reports it.",
+                    jobId, entry.JobType);
             }
             catch (Exception ex)
             {
@@ -219,16 +263,27 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         }
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// Recovers pending work by calling each handler's
+    /// <see cref="IJobHandler.RecoverPendingJobsAsync(CancellationToken)"/> and scheduling what it returns.
+    /// </summary>
+    /// <remarks>
+    /// The host waits for this to finish before it starts serving, so recovery queries should be
+    /// cheap, indexed reads. A handler whose recovery throws is logged and skipped; the others
+    /// still recover.
+    /// </remarks>
+    /// <param name="cancellationToken">Signalled when the host abandons startup.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Tickless starting - recovering pending jobs from domain state.");
 
         foreach (var handler in _handlers.Values)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var pending = (await handler.RecoverPendingJobsAsync().ConfigureAwait(false)).ToList();
+                var pending = (await handler.RecoverPendingJobsAsync(cancellationToken).ConfigureAwait(false)).ToList();
                 foreach (var job in pending)
                 {
                     await ScheduleAsync(job.JobId, job.ExecuteAtUtc, handler.JobType, job.Payload).ConfigureAwait(false);
@@ -241,6 +296,10 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
                         pending.Count, handler.JobType);
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to recover jobs for handler '{JobType}'.", handler.JobType);
@@ -250,29 +309,69 @@ public sealed class InProcessJobScheduler : IJobScheduler, IHostedService
         _logger.LogInformation("Tickless started with {Count} handler(s) registered.", _handlers.Count);
     }
 
-    /// <inheritdoc />
-    public Task StopAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Stops the scheduler: cancels every timer, signals the cancellation token passed to running
+    /// handlers, and waits for those handlers to finish.
+    /// </summary>
+    /// <remarks>
+    /// The wait ends when every handler has finished or <paramref name="cancellationToken"/> is
+    /// cancelled, which the host does when <c>HostOptions.ShutdownTimeout</c> elapses. Handlers still
+    /// running then are abandoned with a logged warning rather than an exception; their domain rows
+    /// are still pending, so recovery picks them up on the next start. After this method is called,
+    /// <see cref="ScheduleAsync"/> logs a warning and schedules nothing.
+    /// </remarks>
+    /// <param name="cancellationToken">Signalled when the host stops waiting for a graceful shutdown.</param>
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Tickless stopping - cancelling {Count} scheduled job(s).", _scheduledJobs.Count);
+
+        // Asynchronous so that callbacks handlers registered on the token run off this thread.
+        await _stopping.CancelAsync().ConfigureAwait(false);
 
         foreach (var jobId in _scheduledJobs.Keys)
         {
             CancelInternal(jobId);
         }
 
-        return Task.CompletedTask;
+        var executions = _executions.Keys.ToArray();
+        if (executions.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(executions).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Tickless stopped before {Count} running job(s) finished. They run again on the next start if recovery still reports them.",
+                executions.Count(e => !e.IsCompleted));
+        }
+
+        foreach (var execution in executions)
+        {
+            if (execution.IsCompleted)
+            {
+                _executions.TryRemove(execution, out _);
+            }
+        }
     }
 
     // A class rather than a record: entries are compared by reference, so a conditional remove
     // only ever removes the exact entry the caller armed.
     private sealed class ScheduledEntry
     {
-        private readonly CancellationTokenSource _cts = new();
+        private readonly CancellationTokenSource _cts;
 
-        public ScheduledEntry(DateTime executeAtUtc, string jobType)
+        public ScheduledEntry(DateTime executeAtUtc, string jobType, CancellationToken stopping)
         {
             ExecuteAtUtc = executeAtUtc;
             JobType = jobType;
+            // Linked, so stopping the scheduler cancels every timer, including one armed by a
+            // ScheduleAsync call that raced with StopAsync.
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             // Captured up front: reading CancellationTokenSource.Token after Dispose throws.
             Token = _cts.Token;
         }

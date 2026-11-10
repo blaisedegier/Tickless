@@ -6,7 +6,7 @@ namespace Tickless;
 /// <remarks>
 /// Tickless deliberately owns no persistent storage. The scheduler is an in-memory cache
 /// of timers; durability comes from each <see cref="IJobHandler"/>'s
-/// <see cref="IJobHandler.RecoverPendingJobsAsync"/>, which reads pending work from the
+/// <see cref="IJobHandler.RecoverPendingJobsAsync(CancellationToken)"/>, which reads pending work from the
 /// caller's domain tables on application startup.
 /// </remarks>
 public interface IJobScheduler
